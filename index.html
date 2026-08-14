@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0b0907" />
+  <title>雾火神殿</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" href="./icons/icon.svg" />
+  <link rel="apple-touch-icon" href="./icons/icon.svg" />
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hurt"></div>
+
+  <div id="boot" data-ui>
+    <svg class="seal" viewBox="0 0 512 512" aria-hidden="true">
+      <radialGradient id="g" cx="50%" cy="42%" r="62%">
+        <stop offset="0%" stop-color="#3a2410"/>
+        <stop offset="100%" stop-color="#0b0907"/>
+      </radialGradient>
+      <linearGradient id="f" x1="0" y1="1" x2="0" y2="0">
+        <stop offset="0%" stop-color="#ff4a00"/>
+        <stop offset="55%" stop-color="#ffb14a"/>
+        <stop offset="100%" stop-color="#fff3c4"/>
+      </linearGradient>
+      <rect width="512" height="512" rx="96" fill="url(#g)"/>
+      <ellipse cx="256" cy="410" rx="150" ry="28" fill="#1c4a4a" opacity=".55"/>
+      <path d="M256 388c-28-72-18-128 0-188 22 48 48 96 8 188z" fill="url(#f)"/>
+    </svg>
+    <h1 class="title">雾火神殿</h1>
+    <p class="subtitle">EXILE OF RUNES</p>
+    <div id="boot-home">
+      <p class="blurb">你师从魔族学者，学会了符文，因此被王国流放到这座岛。<br/>点火、立领地、招麾下、占城寨——终有一日反攻故土。</p>
+      <div class="boot-actions">
+        <button class="btn primary" id="btn-new" data-ui>流放至此</button>
+        <button class="btn ghost hidden" id="btn-continue" data-ui>继续旅途</button>
+      </div>
+      <p class="hint">四种符文 · 符文会成长 · 入夜有袭</p>
+    </div>
+    <div id="rune-pick" class="hidden">
+      <p class="blurb">王国因它将你流放。选一枚符文——它决定你怎么打、怎么活、怎么变强。<br/>符文等级只涨在它自己的路子上，四条路都能通到「世界最强」。</p>
+      <div class="rune-grid" id="rune-grid"></div>
+      <div class="boot-actions">
+        <button class="btn primary" id="btn-rune-go" data-ui>以此符文流放</button>
+        <button class="btn ghost" id="btn-rune-back" data-ui>返回</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="hud" class="hidden">
+    <div class="top-bar">
+      <div>
+        <div class="res-bar" data-ui>
+          <div class="res">木 <b id="r-wood">0</b></div>
+          <div class="res">石 <b id="r-stone">0</b></div>
+          <div class="res">纤 <b id="r-fiber">0</b></div>
+          <div class="res">晶 <b id="r-crystal">0</b></div>
+          <div class="res">魂 <b id="r-essence">0</b></div>
+          <div class="res">核 <b id="r-ember">0</b></div>
+        </div>
+        <div class="rune-chip" data-ui>
+          <b id="rune-name">力量符文</b>
+          <span id="rune-lv">Lv1</span>
+          <i><em id="rune-xp"></em></i>
+        </div>
+        <div class="quest" data-ui>
+          <small id="quest-lab">流放者</small>
+          <div id="quest-text">点燃祭坛，在流放地立下领地</div>
+        </div>
+      </div>
+      <div class="minimap-wrap" data-ui>
+        <canvas id="minimap" width="128" height="128"></canvas>
+        <div class="compass">北</div>
+      </div>
+    </div>
+
+    <div class="side-btns">
+      <button class="icon-btn" id="btn-bag" data-ui>包</button>
+      <button class="icon-btn" id="btn-build" data-ui>筑</button>
+      <button class="icon-btn" id="btn-craft" data-ui>造</button>
+      <button class="icon-btn" id="btn-menu" data-ui>册</button>
+    </div>
+
+    <div class="bars">
+      <div class="bar hp"><i id="hp-fill"></i><label id="hp-lab">生命</label></div>
+      <div class="bar mp"><i id="mp-fill"></i><label id="mp-lab">魔力</label></div>
+      <div class="bar st"><i id="st-fill"></i><label>耐力</label></div>
+      <div class="bar sh" id="sh-bar"><i id="sh-fill"></i><label>腐化侵蚀</label></div>
+    </div>
+
+    <div class="nameplate" id="boss-plate">
+      <div class="nm">雾狱守卫</div>
+      <div class="bb"><i id="boss-hp"></i></div>
+    </div>
+
+    <button id="act" data-ui>交互</button>
+    <div id="toast"></div>
+    <div id="aim-hint"></div>
+
+    <div id="joy" data-ui>
+      <div class="knob" id="knob"></div>
+    </div>
+
+    <div id="hotbar" data-ui></div>
+
+    <div class="cluster">
+      <button class="sk locked" id="sk-3" data-ui data-slot="3"><b></b><span class="cd"></span></button>
+      <button class="sk locked" id="sk-2" data-ui data-slot="2"><b></b><span class="cd"></span></button>
+      <button class="sk locked" id="sk-1" data-ui data-slot="1"><b></b><span class="cd"></span></button>
+      <button class="sk locked" id="sk-0" data-ui data-slot="0"><b></b><span class="cd"></span></button>
+      <button class="atk" id="btn-atk" data-ui>劈</button>
+    </div>
+  </div>
+
+  <div id="build-tray" data-ui>
+    <div class="build-row" id="piece-row"></div>
+    <div class="build-ops">
+      <button class="btn" id="btn-rot">旋转</button>
+      <button class="btn primary" id="btn-place">放置</button>
+      <button class="btn ghost" id="btn-remove">拆除</button>
+      <button class="btn ghost" id="btn-build-close">收起</button>
+    </div>
+  </div>
+
+  <div id="bag-modal" class="modal hidden" data-ui>
+    <div class="sheet sheet-wide">
+      <h2>行囊 · 装备</h2>
+      <div class="bag-layout">
+        <div class="paper" id="paper-col">
+          <div class="paper-lab">穿戴</div>
+          <button class="gear-slot" id="gear-head" data-ui data-slot="head"><b>头</b><i></i></button>
+          <button class="gear-slot" id="gear-body" data-ui data-slot="body"><b>身</b><i></i></button>
+          <button class="gear-slot" id="gear-cloak" data-ui data-slot="cloak"><b>披</b><i></i></button>
+        </div>
+        <div class="bag-main">
+          <div class="bag-grid" id="bag-grid"></div>
+          <div class="bag-detail" id="bag-detail">点选物品：装备到快捷栏、穿上或使用。</div>
+        </div>
+      </div>
+      <div class="bag-ops">
+        <button class="btn" id="btn-bag-equip">装备</button>
+        <button class="btn" id="btn-bag-use">使用</button>
+        <button class="btn ghost" id="btn-bag-drop">丢弃 1</button>
+        <button class="btn ghost" id="btn-bag-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="craft-modal" class="modal hidden" data-ui>
+    <div class="sheet sheet-wide">
+      <h2>打造</h2>
+      <p class="craft-note" id="craft-note">在工坊旁可打造全部配方。绷带、干粮可就地制作。</p>
+      <div class="tabs" id="craft-tabs">
+        <button class="tab on" data-ui data-tab="tool">工具</button>
+        <button class="tab" data-ui data-tab="armor">防具</button>
+        <button class="tab" data-ui data-tab="cons">消耗</button>
+        <button class="tab" data-ui data-tab="magic">秘术</button>
+      </div>
+      <div class="grid" id="craft-grid"></div>
+      <button class="btn ghost" style="margin-top:12px;width:100%" id="btn-craft-close">关闭</button>
+    </div>
+  </div>
+
+  <div id="menu-modal" class="modal hidden" data-ui>
+    <div class="sheet">
+      <h2>流放者手册</h2>
+      <p style="font-size:13px;line-height:1.7;color:#d9cba8;">
+        你师从一位魔族学者，学会了符文。王国因此将你流放至此。<br/>
+        <b>符文会成长</b>：右侧四个技能按等级解锁，等级只靠你自己的路子涨——杀、劳作、建造、治疗。<br/>
+        <b>入夜会来袭</b>：造 <b>火塔</b> 圈出安全地，或用哨塔、傀儡、造物顶住。<br/>
+        <b>建造是整栋放置</b>：工坊打造、傀儡台造傀儡、复生坛复活造物、粮圃药圃产粮产药、栅栏拒马拦人。<br/>
+        小地图褐色方块是别的势力，清掉驻军后到旗帜处占领，可招募麾下；占下的地盘会上贡。<br/>
+        北境「故土渡口」是反攻之路，需先占下两处地盘。<br/>
+        键盘：技能 Q Z V G，装备 1-4，交互 E，建造 B，行囊 I，打造 C。
+      </p>
+      <div class="boot-actions" style="margin-top:8px;width:100%">
+        <button class="btn" id="btn-quality">画质：中</button>
+        <button class="btn" id="btn-audio">音效：开</button>
+        <button class="btn ghost" id="btn-save">立刻保存</button>
+        <button class="btn ghost" id="btn-reset">放弃存档并苏醒</button>
+        <button class="btn primary" id="btn-menu-close">回到雾境</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dead-modal" class="modal hidden" data-ui>
+    <div class="sheet">
+      <h2>符文将你唤回</h2>
+      <p style="font-size:14px;color:#d9cba8;">你在雾岛倒下。随身材料散落，祭坛上的禁忌符文仍记得你。</p>
+      <button class="btn primary" style="width:100%;margin-top:8px" id="btn-respawn">在祭坛苏醒</button>
+    </div>
+  </div>
+
+  <script src="./js/three.min.js"></script>
+  <script src="./js/game.js"></script>
+</body>
+</html>
