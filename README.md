@@ -13,7 +13,9 @@
 
 不需要账号，不需要服务器。存档写在浏览器本地。MIT 许可。
 
-推到 GitHub 后，仓库 Settings → Pages 选 GitHub Actions，即可用 Pages 在手机上打开。
+**手机直接玩：** [1358789957.github.io/mistfire-sanctum](https://1358789957.github.io/mistfire-sanctum/)
+
+仓库：https://github.com/1358789957/mistfire-sanctum
 
 ## 在手机上玩
 
