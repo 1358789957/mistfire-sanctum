@@ -377,6 +377,7 @@ personality:
 
 speech_style:
   register: 口语、随意、短句为主
+  bubble_style: 连珠炮        # 连珠炮 / 正常 / 长段党：习惯一次发几条气泡（喂给 §9.2 的策略层）
   habits:
     - 爱用"草""绝了""笑死""确实""还行吧""emmm""？？？"
     - 打字经常不用标点，句末不加句号
@@ -658,7 +659,11 @@ async def gen_content(llm, sys_prompt, history, user_msg, memory):
 
 ```python
 COLLOQUIAL = """把下面这段话改写成「{name}」在 QQ 上会打出来的样子：
-- 拆成 1~3 条短消息，用 ||| 分隔
+- 用 ||| 分隔成若干条气泡，条数由情绪和内容决定，别固定：
+    · 只是附和/反应、一句能说完 → 就 1 条（"在""哈哈哈""草 真的假的"）
+    · 激动/惊讶/吐槽上头 → 连发 3~5 条短的，每条几个字（例："卧槽"|||"你说真的"|||"笑死我了"）
+    · 讲一件事 → 按话头拆 2~4 条，一条一个意思
+    · 认真解释/安慰 → 1~2 条，句子说完整些，别拆太碎
 - 口语、随意，能不加标点就不加，句末别加句号
 - 允许语气词/口头禅，允许一两个不影响理解的错别字
 - 不要 emoji 堆砌，不要 markdown、列表、编号
@@ -734,34 +739,92 @@ async def human_delay(adapter, target, part_text, is_first, prev_len, complexity
 - **偶尔超长延迟**：模拟"手机搁一边了"，每次有小概率 sleep 几十秒到几分钟。
 - **"正在输入…"要和打字时长匹配**：亮了输入态就该在合理时间内发出，别亮了半天不发。
 
-### 9.2 消息拆分（多条短消息）
+### 9.2 发几条气泡：动态决定，不是固定两条
 
-真人爱把一句话拆成好几条发。§8.3 已用 `|||` 让 LLM 拆；也可再做一层保险，按标点/长度兜底拆分：
+**气泡条数是一个随场景变化的分布，不是常数。** "每次都发两三条"和"每次都发一大段"一样假。真人发几条，取决于四件事：情绪强度、这条话是什么性质、和谁聊、以及自己的打字习惯。
+
+| 场景 / 情绪 | 典型气泡数 | 每条长度 | 条间节奏 |
+|---|---|---|---|
+| 附和 / 反应（在、哈哈、啊?） | 1（偶尔 2） | 极短 | — |
+| 日常闲聊 / 叙述 | 1~3 | 短 | 中等 0.6~1.5s |
+| 讲一件事 / 吐槽 | 2~4 | 短~中 | 中等 |
+| 情绪爆发（惊讶 / 兴奋 / 生气） | 3~6 | 极短，连珠炮 | 极短 0.25~0.7s |
+| 认真解释 / 安慰 / 正经事 | 1~2 | 较长、句子完整 | 慢 1.5~3s |
+
+条数由**两层配合**决定：
+
+1. **LLM 语义拆**（§8.3 的 prompt 已按情绪 / 性质给了示例）——它最懂"哪里该断、断成几条"。
+2. **策略层兜底与调速**：算一个目标条数 + 节奏，用来 ① 修正 LLM 拆得不合场景的情况（正经话拆太碎就合并、激动话只给一条就再拆开），② 决定条与条之间的间隔（连珠炮还是慢慢说）。
+
+```python
+import random
+
+# 每种意图：目标条数(低/中/高) 与 条间隔(秒)
+BUBBLE_PROFILE = {
+    "reaction": dict(count=(1, 1, 2), gap=(0.3, 0.9)),
+    "chat":     dict(count=(1, 2, 3), gap=(0.6, 1.5)),
+    "story":    dict(count=(2, 3, 4), gap=(0.7, 1.6)),
+    "burst":    dict(count=(3, 4, 6), gap=(0.25, 0.7)),   # 连珠炮，间隔极短
+    "serious":  dict(count=(1, 1, 2), gap=(1.5, 3.0)),    # 少而慢、句子完整
+}
+STYLE_BIAS = {"连珠炮": +1, "正常": 0, "长段党": -1}        # persona.bubble_style，个人习惯
+
+def classify_intent(text, mood):
+    n = len(text)
+    if mood.arousal > 0.7:                          return "burst"    # 情绪上头，压倒一切
+    if n <= 6:                                      return "reaction"
+    if mood.serious or is_comfort_or_advice(text):  return "serious"
+    if n >= 40 or has_narrative(text):              return "story"    # 在讲一件事
+    return "chat"
+
+def target_bubbles(text, mood, relation, persona):
+    intent = classify_intent(text, mood)
+    lo, mid, hi = BUBBLE_PROFILE[intent]["count"]
+    n = random.choices([lo, mid, hi], weights=[3, 4, 2])[0]
+    n += min(2, len(text) // 30)                                    # 内容越长自然越多条
+    if relation.intimacy > 0.7 and random.random() < 0.3: n += 1    # 越熟越爱连发
+    n += STYLE_BIAS.get(persona.bubble_style, 0)                    # 个人打字习惯
+    n = max(1, min(n, 6))
+    if intent == "serious": n = min(n, 2)                           # 正经话别拆碎
+    return intent, n
+
+def reshape_bubbles(parts, target_n):
+    """把 LLM 拆好的 parts 调整到接近 target_n 条：太多就合并，太少就再拆。"""
+    parts = [p for p in parts if p]
+    while len(parts) > target_n:                     # 合并最短的相邻两条
+        i = min(range(len(parts) - 1), key=lambda k: len(parts[k]) + len(parts[k + 1]))
+        parts[i:i + 2] = [(parts[i] + " " + parts[i + 1]).strip()]
+    while len(parts) < target_n:                     # 对最长的一条再拆
+        j = max(range(len(parts)), key=lambda k: len(parts[k]))
+        if len(parts[j]) < 8: break
+        halves = split_message(parts[j], max_len=max(4, len(parts[j]) // 2))
+        if len(halves) < 2: break
+        parts[j:j + 1] = halves
+    return parts
+```
+
+`reshape_bubbles` 依赖下面这个按标点/长度切分的兜底工具（LLM 没给 `|||`、或需要再拆时用）：
 
 ```python
 def split_message(text, max_len=25):
-    """兜底拆分：LLM 没拆或拆得不好时用。"""
     import re
     if len(text) <= max_len:
         return [text]
-    # 按句读/换行/空格切，贪心合并到 max_len
-    chunks = re.split(r'(?<=[。！？!?\n])|(?<=~)|(?<=…)', text)
+    chunks = re.split(r'(?<=[。！？!?\n])|(?<=~)|(?<=…)', text)   # 按句读/换行切
     out, cur = [], ""
     for c in chunks:
         c = c.strip()
-        if not c:
-            continue
+        if not c: continue
         if len(cur) + len(c) <= max_len:
             cur += c
         else:
             if cur: out.append(cur)
             cur = c
     if cur: out.append(cur)
-    # 去掉句末句号（更像 QQ）
-    return [p.rstrip("。") for p in out]
+    return [p.rstrip("。") for p in out]              # 去句末句号，更像 QQ
 ```
 
-拆句上限：单轮一般 1~3 条，超过很可疑。
+上限锁在 6 条：再多几乎必然是 bot 在刷屏。`classify_intent` 里的 `mood.arousal`（唤醒度）来自 §7 情绪值——情绪越上头，越会连珠炮式地爆发短句。
 
 ### 9.3 错别字与自我修正
 
@@ -813,17 +876,31 @@ async def maybe_sticker(adapter, target, mood_tag, p=0.25):
 
 ### 9.5 完整发送编排
 
-把上面拼起来——从"要发的若干条"到"真的发出去"：
+把上面拼起来——先按场景定"发几条、什么节奏"，再一条条发出去。第一条走完整的"看到→阅读→思考→打字"延迟，后续条用**意图对应的间隔**（连珠炮就短、正经话就慢）：
 
 ```python
-async def deliver(adapter, target, parts, prev_msg_len, complexity, mood_tag):
+async def deliver(adapter, target, parts, prev_msg_len, complexity, mood, relation, persona):
+    intent, n = target_bubbles(" ".join(parts), mood, relation, persona)
+    parts = reshape_bubbles(parts, n)                     # 调到该场景合理的条数
+    gap_lo, gap_hi = BUBBLE_PROFILE[intent]["gap"]
     for i, part in enumerate(parts):
-        await human_delay(adapter, target, part, is_first=(i==0),
-                          prev_len=prev_msg_len, complexity=complexity)
+        if i == 0:
+            await human_delay(adapter, target, part, is_first=True,
+                              prev_len=prev_msg_len, complexity=complexity)
+        else:
+            await asyncio.sleep(random.uniform(gap_lo, gap_hi))   # 条间隔 = 意图节奏
+            try: await adapter.set_input(target)
+            except Exception: pass
+            await asyncio.sleep(typing_time(len(part)))
         await send_with_human_error(adapter, target, part)
-    # 收尾偶尔补个表情包
-    await maybe_sticker(adapter, target, mood_tag)
+    # 闲聊/讲事 小概率"想起来再补一句"：更长停顿后追一条
+    if intent in ("chat", "story") and random.random() < 0.15:
+        await asyncio.sleep(random.uniform(3, 8))
+        await send_with_human_error(adapter, target, afterthought())  # "对了…" 之类
+    await maybe_sticker(adapter, target, mood_tag_of(mood))
 ```
+
+这样同一句"意思"，在不同情绪/关系/人设下会展开成**不同数量、不同节奏**的气泡：附和就一条"哈哈"；听到大新闻会"卧槽"→"真的假的"→"你没骗我吧"连甩三条；正经安慰人则是一两条、慢慢打。
 
 ---
 
@@ -1251,7 +1328,7 @@ sequenceDiagram
 - [ ] 没有 markdown、列表、编号、代码块、加粗
 - [ ] 没有"作为AI/语言模型/首先其次总之/希望以上/为您服务"
 - [ ] 句子短、口语、句末尽量不带句号
-- [ ] 单轮消息 1~3 条，不刷屏
+- [ ] 气泡条数随情绪/内容变化（附和 1 条、激动连发、正经 1~2 条），不是每次固定两三条，最多不超过 6 条
 - [ ] 延迟随机且合理，"正在输入…"和打字时长匹配
 - [ ] 睡觉时段不秒回，白天忙碌时段回得短
 - [ ] 不懂的话题会说不懂，不百科科普
