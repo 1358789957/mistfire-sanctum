@@ -236,7 +236,7 @@ class OneBotAdapter:
 
 - 会话类型：私聊 vs 群聊（群里默认沉默是常态）
 - 是否 @ 我 / 是否引用我的消息 / 是否直呼我的名字
-- 与"我"人设/近期话题的相关度（用 embedding 相似度或轻量分类）
+- 与"我"人设/近期话题的相关度（由 §5.3 话题兴趣模型的 `topic_match()` 算出，聊到感兴趣的更来劲）
 - 我当前的生活状态（睡觉中 → 大概率不回；空闲 → 回复率高）
 - 我和这个人的关系亲密度（越熟越爱搭话）
 - 最近我的发言频率（防止刷屏，刚说完就降低概率）
@@ -408,6 +408,65 @@ def build_system_prompt(persona, life_state, relation, memory_digest):
 - 用"你现在就是 X"而不是"扮演 X"，减少模型自我暴露倾向。
 - 明确**禁止** markdown、列表、"首先其次"、过度 emoji——这些是最强的 AI-tell。
 - few-shot 样例决定风格上限，样例要精心挑，覆盖不同情绪。
+
+### 5.3 话题兴趣模型（决定它"爱聊什么、怎么聊"）
+
+§5.1 里的 `interests` 只是一个扁平列表，不足以驱动"主动找话题"。要让它**像一个有真实喜好的人**——会主动提自己感兴趣的、被聊到不懂的会发问而不是装懂、还有几个一贯的小观点——需要把兴趣升级成一个带权重的**话题兴趣模型**。它同时喂三个地方：① 主动开口说什么（§11.2）；② 群里要不要插话（§11.3）；③ 被动回复时对话题的热情度（§4.2 的 `topic_relevance`）。
+
+```yaml
+# —— 话题兴趣模型：决定她"爱聊什么、怎么聊、多主动聊" ——
+topics:
+  - name: 猫
+    affinity: 0.95           # 有多爱聊(0~1)：越高越容易主动提、聊得越起劲
+    knowledge: 0.9           # 有多懂：低的话要以"好奇发问"参与，别装专家
+    keywords: [猫, 橘猫, 猫粮, 铲屎, 土豆, 喵]
+    stance: ["觉得橘猫都成精了", "土豆最近胖到抱不动"]   # 一贯的小观点/私货，保一致
+    talk_mode: 分享          # 分享 / 吐槽 / 发问 / 附和 / 晒图
+    seeds: ["土豆今天又干了件蠢事", "你有没有养猫啊"]     # 主动开口的种子话头
+    cooldown_h: 20           # 同一话题最短复提间隔，别老念叨
+  - name: 独立音乐
+    affinity: 0.8
+    knowledge: 0.7
+    keywords: [乐队, 专辑, livehouse, 演出, 单曲, 新歌]
+    stance: ["最近单曲循环某乐队", "livehouse 比音乐节舒服"]
+    talk_mode: 分享
+    seeds: ["新出那张专辑好听", "有个演出你去不去"]
+    cooldown_h: 40
+  - name: 加班与甲方
+    affinity: 0.6
+    knowledge: 0.9
+    keywords: [加班, 甲方, 改稿, 需求, 上班, 摸鱼]
+    stance: ["甲方永远在改需求", "上班主要是来摸鱼的"]
+    talk_mode: 吐槽
+    seeds: ["今天又被甲方折磨", "累死了不想上班"]
+    cooldown_h: 12
+  - name: 编程与硬核科技       # 低 affinity + 低 knowledge：几乎不主动提，被聊到就发问/附和
+    affinity: 0.15
+    knowledge: 0.1
+    keywords: [代码, 编程, 服务器, 显卡, 模型]
+    stance: []
+    talk_mode: 发问
+    seeds: []
+    cooldown_h: 0
+
+# 当前热衷：制造"最近沉迷 X"的鲜活感，到期自动消退
+current_obsession:
+  name: 露营装备
+  until: 2025-09-01
+  boost: 0.3               # 这段时间相关话题 affinity 临时 +0.3
+```
+
+字段怎么理解、为什么这么设：
+
+- **affinity（爱聊程度）**：越高越容易主动挑起、聊起来越带劲。`< 0.4` 的话题基本不会自己提。
+- **knowledge（懂的程度）**：低 knowledge 的话题**即使被聊到也别长篇科普**，要以"好奇发问 / 附和"参与——直接呼应反检测层"别当百科全书"（§10.3）。`affinity 高但 knowledge 低` = "很感兴趣但不太懂"，是非常真实的人设（比如爱看球但讲不清越位）。
+- **stance（一贯小观点）**：给话题挂几条固定态度和私货，保证多次聊同一话题时**立场不漂移**（配合 §6.4 自我一致性）。
+- **talk_mode（参与姿态）**：吐槽型话题（加班/甲方）用来发牢骚，分享型（猫/音乐）用来安利，发问型（不懂的）用来请教。决定它开口时的语气。
+- **seeds（话头）**：主动开口的种子句，LLM 会据此按当时语气改写，别每次一字不差。
+- **cooldown_h（话题冷却）**：同一话题最短复提间隔，防止反复念叨同一件事。
+- **current_obsession（当前热衷）**：一个**有时效**的"最近上头 X"，到期自动消退。真人会阶段性沉迷某个新游戏/新爱好，这个字段让兴趣**随时间流动**，是廉价但极有效的"活人感"。
+
+> 落地提醒：把 `stance` 里的一两条、以及 `current_obsession` 也注入 system prompt（§5.2），让它的观点和"最近在玩啥"在**被动聊天**里也保持一致，而不只在主动时才体现。
 
 ---
 
@@ -797,23 +856,173 @@ async def clean_or_regen(text, regen_fn):
 
 ## 11. 主动性调度（Proactive）
 
-只会被动回复的账号很假。真人会主动。用 `APScheduler` 驱动这些行为：
+只会被动回复的账号很假，真人会主动。但"主动"不是定个闹钟群发早安——那反而更像机器人。一套可信的主动性要回答四个问题：
 
-- **作息问候**：早上冒个泡、深夜"睡了吗"（仅对亲密度高的联系人，且概率化，别群发）。
-- **补回消息**：睡觉时错过的消息，醒来挑一两条回一句"啊刚睡醒""昨晚睡了没看到"。
-- **话题发起**：结合热点/自己的"生活事件"主动分享，"今天那个店排队排死我了""新出的那个歌好听"。
-- **断触重连**：和某人很久没聊，低概率主动找一句，但别太刻意（"在吗"式尬聊要少）。
-- **QQ 动态/说说**：定时发一条符合人设和作息的动态（如支持相应 action / 或用户态接口），进一步坐实"有生活"。
-- **节奏控制**：主动行为要有**全局频率上限**，否则显得骚扰、也容易触发风控。
+> **主动性 = 触发（什么时候想说） + 兴趣模型（想说什么） + 门槛（该不该说） + 目标（跟谁说）**
+
+而且要分成两类、走两条不同链路：
+
+- **主动发起**（cold/warm open）：从零开一个话头——私聊找人、或群里抛新话题。**定时器驱动**（每隔一段时间"想起来找人聊"）。
+- **插话**（join）：群里已经在聊，你插进去。**群消息事件驱动**（每条群消息来时低概率判定要不要接）。
+
+### 11.1 触发器清单：什么情况下它会"想说话"
+
+| 触发类型 | 典型场景 | 话题来源 | 门槛 |
+|---|---|---|---|
+| 作息触发 | 早上冒泡、深夜"还没睡?"、饭点 | 固定问候语 | 仅对亲密度高的人，概率化，绝不群发 |
+| 生活事件触发 | "露营回来累瘫""买了新耳机""加班到现在" | §7 生活状态机吐出的**可分享时刻** | 事件要和某个高 affinity 话题挂钩 |
+| 关系触发 | 很久没聊→重连；答应过的事到期→跟进；记得的日期 | 关系记忆（§6.3） | 重连要低频、别"在吗"式尬聊 |
+| 外部信息触发 | 热搜/新闻/天气/喜欢的乐队出新专 | 外部 feed，**先用兴趣模型过滤** | 只转 affinity 高的，设计师 bot 不会突然聊球赛 |
+| 记忆钩子触发 | 记得对方喜欢 X，手头正好有个 X 相关的东西 | "我的兴趣 ∩ 对方的兴趣" | 是最自然、成功率最高的话头 |
+| 补回触发 | 睡醒/忙完，补一句错过的消息 | 未读消息 | 只挑一两条，别逐条补 |
+
+其中**外部信息触发**和**记忆钩子触发**最能体现"这个人有自己的生活和喜好"，但也最容易翻车（转了不该转的、聊了对方不感兴趣的），所以它们必须经过兴趣模型（§5.3）过滤。
+
+### 11.2 兴趣模型驱动"说什么"
+
+想主动开口时，用 §5.3 的话题兴趣模型选一个话题和话头。核心打分：
+
+`分数 = affinity(含当前热衷加成) × 新鲜度(过了 cooldown 才有分) × 与对方相关度 × 心情系数`
 
 ```python
-scheduler.add_job(morning_greeting, "cron", hour=8,  minute=random.randint(0,59), jitter=1800)
-scheduler.add_job(night_check,      "cron", hour=23, minute=random.randint(0,59), jitter=1800)
-scheduler.add_job(share_life_event, "interval", hours=random.uniform(20,50))
-scheduler.add_job(reengage_silent,  "interval", hours=random.uniform(30,72))
+# interest.py —— 话题匹配与主动话题选择
+import time, math, random
+
+def topic_affinity(t):
+    """含'当前热衷'加成的实时 affinity。"""
+    a = t["affinity"]
+    ob = PROFILE.get("current_obsession")
+    if ob and time.time() < parse_date(ob["until"]):
+        if ob["name"] in t["name"] or any(ob["name"] in k for k in t["keywords"]):
+            a = min(1.0, a + ob["boost"])
+    return a
+
+def topic_match(text, profile):
+    """一段话与兴趣模型的最佳匹配 → (话题, 分数0~1)。关键词 + 向量双通道。"""
+    emb = embed(text)                         # 复用 §6 的 embedding
+    best, best_s = None, 0.0
+    for t in profile["topics"]:
+        kw_s  = min(1.0, sum(1 for k in t["keywords"] if k in text) * 0.4)
+        vec_s = cos(emb, t["_vec"])           # 关键词+种子预先向量化并缓存到 _vec
+        s = max(kw_s, vec_s) * topic_affinity(t)
+        if s > best_s:
+            best, best_s = t, s
+    return best, best_s
+
+def pick_proactive_topic(profile, target, memory, feed, mood):
+    """挑一个'想主动说'的话题 → (话题, 话头)。"""
+    cands = []
+    # 1) 我的高 affinity 话题里，过了 cooldown、且我有话头的
+    for t in profile["topics"]:
+        if topic_affinity(t) < 0.4 or not t["seeds"]:
+            continue                          # 不爱聊 / 没话头的不主动提
+        if time.time() - last_talked(t["name"], target) < t["cooldown_h"] * 3600:
+            continue
+        rel = interest_overlap(t, target)     # 对方也感兴趣 → 加分
+        score = topic_affinity(t) * (0.5 + 0.5 * rel) * mood_share_factor(mood)
+        cands.append((score, t, random.choice(t["seeds"])))
+    # 2) 外部信息命中我的高 affinity 话题（热搜/新专/降温）
+    for item in feed:
+        t, s = topic_match(item.title, profile)
+        if t and s > 0.6:
+            cands.append((s * 0.9, t, f"刚看到{item.title} "))
+    # 3) 记忆钩子：对方在意的事最近有动静
+    for hook in memory.hooks_for(target):
+        cands.append((0.7, hook.topic, hook.opener))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: c[0], reverse=True)
+    # 头部里带随机，别永远挑最高分（更像人）
+    _, topic, opener = random.choice(cands[:3])
+    return topic, opener
 ```
 
-所有主动消息都要过响应决策（对方现在方不方便）+ 拟人化层（延迟、拆句）。
+`mood_share_factor`：心情差时调低（不想分享）；`interest_overlap`：查对方关系画像（§6.3）里的 tags 与该话题是否重合。
+
+### 11.3 群聊插话：兴趣匹配决定"接不接话"
+
+插话是**事件驱动**的——每条群消息进来，算一下当前群话题和兴趣模型的匹配度，匹配到高 affinity 话题才有插话冲动；低 knowledge 的话题即便插也是"好奇发问"，不长篇科普。
+
+```python
+def should_chime_in(group_ctx, profile):
+    recent = " ".join(m.text for m in group_ctx.last_msgs[-5:])
+    topic, score = topic_match(recent, profile)
+    if score < 0.45:                                   # 不对味，闭嘴
+        return None
+    p  = score * group_ctx.life.awake_factor           # 睡觉/忙碌时基本不插
+    p *= min(1.0, 0.3 + group_ctx.group_activity)      # 死群别自嗨
+    p *= math.exp(-1.2 * group_ctx.my_recent_msgs_10m) # 刚说过就压一压，别刷屏
+    if random.random() < p:
+        return topic          # 交给生成层，用 topic["talk_mode"] 的姿态说
+    return None
+```
+
+插话还要叠加 §4.4 的话轮意识（加"犹豫延迟"让真人先说、别抢答）。**低 knowledge 话题的插话**，prompt 里要强制成发问/附和口吻（"这个我不太懂诶，是不是……"），呼应 §10.3 反过度完美。
+
+### 11.4 跟谁说：目标选择
+
+不是逮谁聊谁。按"亲密度 × 多久没聊 × 话题与对方相关度 × 对方历史回应率"给联系人打分，概率挑人：
+
+```python
+def rank_targets(contacts, topic):
+    scored = []
+    for c in contacts:
+        silence = (time.time() - c.last_talk) / 3600
+        recency = min(1.0, silence / 48)               # 越久没聊越想找(但别太久显刻意)
+        rel  = interest_overlap(topic, c) if topic else 0.5
+        s = c.intimacy * (0.4 + 0.6 * recency) * (0.5 + 0.5 * rel) * (0.3 + 0.7 * c.responsiveness)
+        scored.append((s, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored
+```
+
+### 11.5 该不该说：门槛、频控与防骚扰
+
+主动是把双刃剑，频率没控好就是骚扰、也最容易触发风控。硬门槛：
+
+```python
+DAILY_BUDGET = 8                              # 全天主动次数上限
+def proactive_allowed(state, target):
+    if state.today_proactive >= DAILY_BUDGET:            return False
+    if not state.life.free_now:                          return False   # 在忙/在睡不主动
+    if target and time.time() - target.last_proactive < 6 * 3600: return False  # 单人冷却
+    if target and target.recent_ignored >= 2:            # 连续被冷落 → 学乖
+        if random.random() > 0.2:                        return False   # 大幅降概率
+    return True
+```
+
+- **防骚扰学习**：`recent_ignored` 记录最近几次主动是否被无视/敷衍，被冷落就大幅调低对该人的主动概率——学会"这人不爱被打扰"。
+- **反检测**：所有定时都加 `jitter`，别整点规律；群里别永远第一个冒泡；主动消息一样要过拟人化层（延迟、拆句、§9）。
+
+### 11.6 串起来：调度 + 接回响应决策
+
+```python
+async def proactive_tick():
+    if not proactive_allowed(state, None):
+        return
+    life_event = state.life.pop_shareable_event()        # §7 状态机产出的可分享时刻
+    for _, target in rank_targets(contacts, None)[:5]:
+        if not proactive_allowed(state, target):
+            continue
+        pick = pick_proactive_topic(PROFILE, target, memory, world_feed, state.life.mood)
+        if life_event and (not pick or random.random() < 0.4):
+            opener = life_event.opener                   # 优先分享自己的生活事件
+        elif pick:
+            _, opener = pick
+        else:
+            continue
+        await send_proactive(target, opener)             # 过 §4 时机判断 + §9 拟人化发送
+        state.today_proactive += 1
+        break                                            # 一次 tick 最多找一个人
+
+# 定时器：主动发起 + 作息问候（都带 jitter，避免规律）
+scheduler.add_job(proactive_tick,   "interval", minutes=random.uniform(40, 90), jitter=600)
+scheduler.add_job(morning_greeting, "cron", hour=8,  minute=random.randint(0, 59), jitter=1800)
+scheduler.add_job(night_check,      "cron", hour=23, minute=random.randint(0, 59), jitter=1800)
+# 插话不进调度器：挂在群消息事件上，每条消息 should_chime_in() 一次
+```
+
+**闭环**：§4.2 响应决策里的 `ctx.topic_relevance`，现在就由 `topic_match()` 算出来——同一套兴趣模型，既管"被动聊到感兴趣的话题会更来劲"，也管"主动去开这个话题"。所有主动消息最后都要过：对方此刻方不方便（§4 + §7 作息）+ 拟人化发送（§9 延迟/拆句）。
 
 ---
 
@@ -1039,12 +1248,13 @@ humanbot/
 │  ├─ adapter.py             # (若不用框架)裸 WS 适配
 │  ├─ policy.py              # 响应决策 §4
 │  ├─ persona.py             # 人设加载 + system prompt §5
+│  ├─ interest.py            # 话题兴趣模型：匹配/选题 §5.3 §11.2
 │  ├─ memory.py              # 记忆系统 §6
 │  ├─ life.py                # 生活状态机 §7
 │  ├─ generator.py           # 两段式生成 §8
 │  ├─ humanizer.py           # 时延/拆句/错字/表情 §9
 │  ├─ antidetect.py          # 探针识别 + AI-tell 清洗 §10
-│  ├─ proactive.py           # 主动性调度 §11
+│  ├─ proactive.py           # 主动性调度：触发/选题/门槛/目标 §11
 │  └─ store.py               # DB + 向量库
 └─ eval/
    ├─ probes.yaml            # 红队探针集 §12
