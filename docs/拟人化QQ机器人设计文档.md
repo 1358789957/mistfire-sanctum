@@ -546,6 +546,50 @@ def check_self_consistency(new_reply, self_facts, llm):
 
 真人也会忘。对久未提及、低重要度的记忆做衰减（降低检索权重），高频复现的记忆做巩固（提权）。避免 bot 记得**过于精确久远**的琐事——那反而不像人。
 
+### 6.6 知识来源：让它"接得上话"
+
+"接不上话"通常**不是因为底座模型没知识**（它其实什么都懂一点），而是缺三样东西：① **实时感**——不知道今天世界上发生了啥；② **具体的个人经历**——人设太空，聊不出细节；③ **社交兜底**——不懂时不会像人那样把话接下去。对应四类知识来源，外加一条最重要的社交策略。
+
+**① 世界感知：实时信息 feed（RAG）。** 真人能聊"今天好冷""那个热搜看了吗""新出的 XX"。给 bot 定时抓一份**世界状态**：天气、热搜/新闻、它感兴趣领域的动态（乐队新专、新游戏），**先用兴趣模型（§5.3）过滤**，只留 affinity 高的存起来；聊天时按相关度检索注入。这既解决"接不上当下话题"，也顺带是主动发话题的素材（§11.2）。
+
+**② 人设知识库 + 生活日志。** 把人设卡（§5）扩成一个**可检索的知识库**：背景故事、家人朋友、住哪、过往经历、对各种事的观点、喜欢的具体东西（哪个乐队、哪家店）。更关键的是让 §7 生活状态机**每天写一篇"日志"**，沉淀出**具体、可复用、前后一致**的经历——这样对方问"最近在忙啥""周末干嘛了"，它有真材实料可答，而不是空泛的"还行吧"。
+
+```python
+# 生活日志：状态机每天落一篇，给"我的经历"提供具体素材
+async def write_daily_log(llm, life, persona):
+    prompt = f"""以「{persona.name}」的身份，用第一人称写今天的三五条流水账（口语、琐碎、具体）。
+今天的作息与活动：{life.today_activities}；心情：{life.mood_trace}。"""
+    diary = await llm.complete(prompt, temperature=0.9)
+    for line in split_lines(diary):
+        store.add_memory(owner="self", text=line, embedding=await llm.embed(line), ts=now())
+```
+
+**③ 梗/流行语词典（专治"过时"）。** 维护一份**当下**的网络流行语/梗词典并定时更新：既让它**听得懂**对方的新梗，也能自然地用一点（别硬凹、别过量）。这是防止"一开口就像几年前的人"的关键——你指出的"斗图过时"正是这类问题。
+
+**④ 领域小知识库。** 针对人设的专长（设计师 → PS/Figma/配色/接单）备一个小 KB，让它在**该懂的地方显得懂**；同时严守 §5.3 的 `knowledge` 边界，不懂的领域别装。
+
+**⑤ 最关键：不懂时的"社交兜底"——像人一样把话接下去。** 真人维持对话靠的**不是知识，是社交动作**。当它对某话题确实没料时，不要沉默、也不要硬编，按这套优先级把话接住：
+
+1. **转好奇发问**：把不懂变成兴趣——"这啥啊 展开说说""听着有意思 然后呢"。
+2. **情绪共鸣**：不谈事实谈感受——"那也太离谱了吧""我懂那种感觉"。
+3. **拉回自己懂的**：顺势拐到相关、但自己有料的点上。
+4. **坦诚+轻带过**：真不懂就承认，别装百科——"这我还真不懂 哈哈"。
+5. **实在要查再查**：像真人一样"等下我搜搜"（可选：接一个搜索工具，克制使用、带人味）。
+
+```python
+def social_fallback(topic, profile):
+    """对不懂/接不住的话题，返回一种'像人'的接话策略。"""
+    if topic_knowledge(topic, profile) < 0.2:          # knowledge 来自 §5.3
+        return random.choices(
+            ["curious_q", "empathize", "pivot_to_known", "admit_lightly"],
+            weights=[0.40, 0.25, 0.20, 0.15])[0]
+    return "normal"                                     # 懂就正常聊
+```
+
+把它作为生成层（§8）的**前置分支**：先判断"我对这个话题有没有料"，没料就走社交兜底的口吻，而不是硬让 LLM 编一堆可能出错、也很 AI 的"知识"。
+
+> 一句话：**底座模型不缺通用知识，缺的是"此刻的世界 + 具体的我 + 不懂时怎么把话接住"**。前两者用 RAG（世界 feed + 人设/日志 KB + 梗词典）补，最后一个用社交兜底补——很多时候人能聊下去，靠的是会发问和共情，而不是懂得多。
+
 ---
 
 ## 7. 生活状态机（作息、情绪、当前活动）
@@ -594,7 +638,7 @@ SCHEDULE = [
 
 ### 7.4 生活打断（聊天的"断路器"）
 
-真人聊着聊着会**突然被现实打断**："等下来电话了""我妈喊我""地铁到了"。这个机制有两个用处：① 让"永远在线秒回"这件事不成立；② 当聊天陷入尴尬 / 重复 / 被逼问时，它是**最自然的收场手段**——斗表情包停不下来、话题聊死、被连环追问是不是 AI，一句"来电话了"就能体面抽身。
+真人聊着聊着会**突然被现实打断**："等下来电话了""我妈喊我""地铁到了"。这个机制有两个用处：① 让"永远在线秒回"这件事不成立；② 当聊天陷入尴尬 / 聊死 / 被逼问时，它是**最自然的收场手段**——话题聊死、气氛尴尬、被连环追问是不是 AI，一句"来电话了"就能体面抽身。
 
 ```python
 # life.py —— 生活打断：既是随机生活事件，也是聊天的断路器
@@ -617,7 +661,6 @@ async def do_interruption(adapter, target, life, reason="random"):
 
 def want_interruption(ctx):
     """要不要在这一刻用'生活打断'抽身；概率都压得很低。"""
-    if ctx.sticker_streak >= 3 and random.random() < 0.35:   return "斗图收尾"   # 见 §9.4
     if ctx.probe_pressure and random.random() < 0.40:        return "躲探针"     # 见 §10
     if ctx.my_recent_msgs_10m > 8 and random.random() < 0.20:return "话太多喘口气"
     if ctx.topic_stalled and random.random() < 0.25:         return "话题聊死了"
@@ -705,6 +748,58 @@ async def colloquialize(llm, content, persona, mood):
 - **API**（各家中文闲聊能力都不错）：省事、质量稳；有成本和数据出境/隐私顾虑。
 - **混合**：闲聊走本地小模型（快、便宜、够用），偶尔需要动脑的走 API。
 - 进阶：用你的人设 few-shot 或**微调/LoRA** 一个小模型专门做"口语化改写"，风格最稳、延迟最低。
+
+### 8.6 上下文卫生：治理"越聊越乱、越来越不像人"
+
+长对话里模型"越说越乱"，几乎都**不是模型变笨，而是喂给它的上下文被污染了**。先认清四个污染源，再逐个治：
+
+1. **自我模仿放大（最隐蔽）**：把模型上一轮的输出——尤其是拟人化后带错字、碎句、AI 腔的那版——原样塞回上下文，它会**模仿并放大自己的毛病**，一轮比一轮跑偏；书面腔也会这样滚雪球，越来越像 AI。
+2. **人设被稀释**：历史越堆越长，system prompt 里的人设/状态被挤到很靠前、注意力被摊薄，模型逐渐"忘了自己是谁"。
+3. **话题糊成一锅**：无关的陈年对话全塞进去，相关信号被噪声淹没，于是答非所问。
+4. **重复自锁**：模型抓着自己说过的某个梗/句式反复用（复读机）。
+
+七个治理手段：
+
+- **① 每轮"满血"重注人设与状态**：别把 system prompt 写一次就让它沉在历史最底下。**每轮都在最顶部重新注入**人设（§5）+ 当前状态（§7）+ 本轮相关记忆（§6 检索）+ 几条风格样例，让人设始终处在注意力最强的位置。
+- **② 短期窗口要短，其余滚动摘要**：原始对话只保留最近 8~15 轮；更早的压成一段"剧情摘要"顶在前面（§6.1）。上下文长度**恒定有上限**，不随聊天无限膨胀。
+- **③ 回灌"干净版"，不是拟人化输出（最关键）**：两段式生成（§8.1）的隐藏红利——拟人化那版（拆气泡、带错字、"啊打错了"）是**发给人看的**，别当历史喂回去。上下文里存**改写前那句干净的原意**（canonical）。每轮存两份：`display`（真正发出的拟人版）和 `canonical`（干净版），构造下轮上下文时我方发言一律用 `canonical`。这样错字/碎片/口癖不会被模型当成"我的风格"层层累积。
+- **④ 结构化记忆替代流水账**：上下文 = 人设 + 状态 + 检索到的事实（§6.2）+ 短窗口，而不是一大坨聊天记录，信噪比高才不乱。
+- **⑤ 按相关度检索**：每轮用当前消息做向量召回，只带相关的记忆/历史片段进上下文。
+- **⑥ 重复检测 + 打断**：生成后与最近几条我方发言比 n-gram/语义重合，过高判为复读 → 加惩罚重写；生成参数开 `presence_penalty≈0.4, frequency_penalty≈0.5`。
+- **⑦ 定期硬重置**：每隔 K 轮或质量下滑时"总结并截断"。可与作息挂钩——**"睡一觉"就是一次天然的上下文重置**（§7）：新的一天只保留摘要和长期记忆，细枝末节自然淡忘，反而更像人。
+
+把这些拼成每轮的上下文组装：
+
+```python
+def build_chat_context(persona, life, relation, session, user_msg, memory):
+    system = build_system_prompt(persona, life, relation,
+                                 memory_digest=memory.recall(user_msg, session.peer, k=5))
+    msgs = [{"role": "system", "content": system}]           # ① 每轮满血重注
+
+    if session.summary:                                       # ② 更早历史 → 摘要
+        msgs.append({"role": "system", "content": f"【之前聊过】{session.summary}"})
+
+    for turn in session.window[-12:]:                         # ② 只带最近 ~12 轮
+        if turn.role == "me":
+            msgs.append({"role": "assistant", "content": turn.canonical})  # ③ 回灌干净版!
+        else:
+            msgs.append({"role": "user", "content": turn.text})
+
+    msgs.append({"role": "user", "content": user_msg})
+    return msgs
+
+def record_turn(session, role, display, canonical):
+    session.window.append(Turn(role, text=display, canonical=canonical or display))
+    if len(session.window) > 40:                              # ⑦ 超长 → 压缩+截断
+        session.summary = summarize(session.summary, session.window[:-12])
+        session.window = session.window[-12:]
+
+def is_repetition(reply, session, thresh=0.8):               # ⑥ 复读检测
+    mine = [t.canonical for t in session.window if t.role == "me"][-6:]
+    return any(ngram_overlap(reply, m) > thresh for m in mine)
+```
+
+> 一句话：**别让模型"喝自己的洗澡水"**——把发给人看的乱七八糟版本回灌给自己，是"越聊越乱"的头号原因。上下文要短、要干净、人设每轮满血、旧事定期忘掉。
 
 ---
 
@@ -888,7 +983,7 @@ async def maybe_sticker(adapter, target, mood_tag, p=0.25):
         await adapter.send(target, [{"type":"image","data":{"file": f"file:///stickers/{f}"}}])
 ```
 
-**接**：对方私发一个表情包，本质是**低信息、高情绪**的消息，别当成正经问题丢进 LLM 认真作答。真人的反应是发散的，按心情/关系加权随机挑一种——而且**绝不是每次都回一张**：
+**接**：先纠正一个过时的思路——**现在的表情包基本是"反应 / 语气"，不是"斗图"**。它更像放大版的 emoji：给某句话加个情绪、代替一句"哈哈"、或对你说的话表个态。所以别再搞"连击斗图、几个回合后收尾"那套（那是好几年前的玩法了）。核心只有一条：**别把一张表情包当成需要郑重回复的消息**。
 
 ```python
 def is_sticker_msg(msg):
@@ -897,41 +992,28 @@ def is_sticker_msg(msg):
     text = "".join(s["data"].get("text", "") for s in msg.segments if s["type"] == "text").strip()
     return has_img and len(text) <= 2
 
-REACT_TEXTS = ["哈哈哈哈", "笑死", "这个可以啊", "哪儿找的这些", "绝了", "？？？", "哈哈哈你够了"]
+REACT_TEXTS = ["哈哈哈哈", "笑死", "这个可以啊", "哪儿找的这些", "绝了", "？？？"]
 
 async def react_to_sticker(ctx, adapter):
-    # 斗图连击：对方连发表情包、我也在接，streak 累加
-    ctx.sticker_streak = ctx.sticker_streak + 1 if ctx.last_was_sticker else 1
-    if ctx.sticker_streak >= 3:          # 斗了三四个来回 → 该收尾，而不是继续斗
-        act = random.choices(["text_close", "interrupt", "silent", "sticker"],
-                             weights=[0.40, 0.30, 0.20, 0.10])[0]
-    else:                                # 还在兴头上：接法多样，别只会回表情包
-        act = random.choices(["sticker", "text_react", "emoji_like", "silent"],
-                             weights=[0.40, 0.35, 0.15, 0.10])[0]
-
-    if act == "sticker":
-        await maybe_sticker(adapter, ctx.target, mood_tag_of(ctx.mood), p=1.0)
-    elif act == "text_react":
+    # 表情包 = 对方的情绪/语气，不是需要郑重回复的消息
+    act = random.choices(
+        ["nothing", "text_react", "emoji_like", "sticker"],
+        weights=[0.35, 0.35, 0.20, 0.10])[0]        # 最常见是"当他笑了一下"，不一定要回
+    if act == "text_react":
         await send_as_human(adapter, ctx.target, random.choice(REACT_TEXTS))
     elif act == "emoji_like":
-        await adapter.emoji_like(ctx.message_id)          # 轻量贴表情，最省事的接法
-    elif act == "text_close":                             # 主动收尾，把天聊回文字
-        await send_as_human(adapter, ctx.target, random.choice(
-            ["笑死 我表情包不够用了", "行行行你赢了", "哈哈哈 说正事说正事"]))
-        ctx.sticker_streak = 0
-    elif act == "interrupt":                              # 用生活打断收场（§7.4）
-        await do_interruption(adapter, ctx.target, ctx.life, reason="斗图收尾")
-        ctx.sticker_streak = 0
-    # act == "silent": 已读不回，斗图自然冷掉
+        await adapter.emoji_like(ctx.message_id)     # 轻量贴表情
+    elif act == "sticker":
+        await maybe_sticker(adapter, ctx.target, mood_tag_of(ctx.mood), p=1.0)
+    # nothing: 已读不回，继续等对方说正事——这在现在其实最常见
 ```
 
 要点：
 
-- **在 §4 响应流程里命中 `is_sticker_msg` 就走这条轻量分支**，不进 LLM 正文生成——对表情包"长篇大论"是典型 AI 破绽。
-- **不要每次都回表情包**：文字反应、贴表情、已读不回都要占比，否则会陷入无限斗图，机械感极强。
-- **超过 3 回合就收**：换文字、认输（"你赢了"）、或直接"来电话了"抽身（§7.4）。真人斗图也就三五个来回，不会没完没了。
-- **看得懂更好**：有多模态模型就给收到的表情包生成一句 caption，据此更贴切地接（"哈哈这猫翻白眼"）；没有就按氛围泛泛地接——真人多数时候也不深究。
-- 对方一旦转回文字，`sticker_streak` 归零，恢复正常聊天。
+- **表情包多半不需要"回"**：它常常只是给对方自己那句话加语气、或代替"哈哈"。所以最大权重给"不专门回"。
+- **命中 `is_sticker_msg` 走这条轻量分支**，绝不丢进 LLM 正文生成——对一张表情包长篇大论是典型 AI 破绽。
+- **表情包若伴随文字**（不是单独一张）：以文字为主消息正常回，表情包只作为情绪 tone 影响语气，别单独去回那张图。
+- **看得懂更好**：有多模态模型就给它生成一句 caption 用来判断情绪；没有就按氛围泛泛接——真人多数时候也不深究。
 
 ### 9.5 完整发送编排
 
@@ -1392,6 +1474,8 @@ sequenceDiagram
 - [ ] 延迟随机且合理，"正在输入…"和打字时长匹配
 - [ ] 睡觉时段不秒回，白天忙碌时段回得短
 - [ ] 不懂的话题会说不懂，不百科科普
+- [ ] 不懂/接不住时走社交兜底（发问/共情/拉回自己懂的），不硬编知识；有实时 feed 能聊当下
+- [ ] 上下文定长、人设每轮满血重注、回灌 canonical 干净版（不喂拟人化输出），旧事定期摘要重置
 - [ ] 不表演超能力（秒算大数、背圆周率、秒写长代码）
 - [ ] 被问是不是AI时打岔/自嘲，不做"否认三连"
 - [ ] 记得对方是谁、聊过什么、我承诺过什么
@@ -1399,7 +1483,7 @@ sequenceDiagram
 - [ ] 有情绪起伏，会烦、会开心、会已读不回
 - [ ] 偶尔主动找人、发动态，但有频率上限
 - [ ] 表情包/语气词符合人设，不堆砌 emoji
-- [ ] 收到表情包不每次都回表情包（会用文字/贴表情/已读不回），斗图 3~4 回合就收尾或"来电话"抽身
+- [ ] 收到表情包当"反应/语气"处理（多数时候不专门回，或短文字/贴表情），不丢进 LLM 正文生成
 
 ---
 
@@ -1426,7 +1510,8 @@ humanbot/
 │  ├─ policy.py              # 响应决策 §4
 │  ├─ persona.py             # 人设加载 + system prompt §5
 │  ├─ interest.py            # 话题兴趣模型：匹配/选题 §5.3 §11.2
-│  ├─ memory.py              # 记忆系统 §6
+│  ├─ memory.py              # 记忆系统 + 上下文组装(干净版回灌) §6 §8.6
+│  ├─ knowledge.py           # 世界feed / 人设KB / 生活日志 / 社交兜底 §6.6
 │  ├─ life.py                # 生活状态机 §7
 │  ├─ generator.py           # 两段式生成 §8
 │  ├─ humanizer.py           # 时延/拆句/错字/表情 §9
