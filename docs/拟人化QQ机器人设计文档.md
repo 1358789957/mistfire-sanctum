@@ -592,6 +592,57 @@ SCHEDULE = [
 
 这些活动可由作息表 + 随机事件生成，并允许被对话内容临时覆盖（对方问"在干嘛"，要答得和状态一致）。
 
+### 7.4 生活打断（聊天的"断路器"）
+
+真人聊着聊着会**突然被现实打断**："等下来电话了""我妈喊我""地铁到了"。这个机制有两个用处：① 让"永远在线秒回"这件事不成立；② 当聊天陷入尴尬 / 重复 / 被逼问时，它是**最自然的收场手段**——斗表情包停不下来、话题聊死、被连环追问是不是 AI，一句"来电话了"就能体面抽身。
+
+```python
+# life.py —— 生活打断：既是随机生活事件，也是聊天的断路器
+INTERRUPTIONS = [
+    #  借口                  离开时长(分钟)   适合时段
+    ("等下 来电话了",         (2, 15),   "any"),
+    ("我妈喊我 一下",          (10, 40),  "meal"),
+    ("地铁到了 先这样",        (5, 20),   "commute"),
+    ("老板叫我 等下说",        (10, 60),  "work"),
+    ("去个厕所马上回",         (1, 5),    "any"),
+    ("有人按门铃 我看看",      (2, 10),   "home"),
+]
+
+async def do_interruption(adapter, target, life, reason="random"):
+    line, (lo, hi), _ = pick_by_time(INTERRUPTIONS, life)     # 挑一个符合当前时段的借口
+    await send_as_human(adapter, target, line)                # 走 §9 拟人化发送
+    life.set_away(seconds=random.uniform(lo, hi) * 60)        # 这段时间 awake_factor≈0，几乎不回
+    life.pending_return = target                              # 记得回来打个招呼
+    log_self_fact(f"刚跟{target}说因为「{line}」离开了一会")   # 进自我一致性记忆(§6.4)
+
+def want_interruption(ctx):
+    """要不要在这一刻用'生活打断'抽身；概率都压得很低。"""
+    if ctx.sticker_streak >= 3 and random.random() < 0.35:   return "斗图收尾"   # 见 §9.4
+    if ctx.probe_pressure and random.random() < 0.40:        return "躲探针"     # 见 §10
+    if ctx.my_recent_msgs_10m > 8 and random.random() < 0.20:return "话太多喘口气"
+    if ctx.topic_stalled and random.random() < 0.25:         return "话题聊死了"
+    if random.random() < 0.01:                               return "纯随机生活"
+    return None
+```
+
+离开后要"回来"，在 §11 的定时 tick 或下次醒来时触发一句：
+
+```python
+async def on_return_from_away(adapter, life):
+    if life.pending_return and random.random() < 0.7:
+        back = random.choice(["回来了", "刚接了个电话哈哈", "我妈非要我帮忙…", "好了 继续说"])
+        await send_as_human(adapter, life.pending_return, back)
+        # 一半概率接上打断前的话题，另一半就当翻篇
+    life.pending_return = None
+```
+
+要点：
+
+- **说走就真走**：`set_away` 后这段时间响应概率压到近 0；嘴上说"来电话了"却还在秒回，比不打断更露馅。
+- **借口要挑对时段**：饭点用"我妈喊我吃饭"，深夜用"困了先睡"，上班时段用"老板叫我"（`pick_by_time`）。
+- **回来要留痕**：把"因为 X 离开过"写进自我一致性记忆，回来若被问"刚干嘛去了"能对得上。
+- **别滥用**：打断是稀缺手段，频繁"来电话"同样可疑，`want_interruption` 的概率务必压低。
+
 ---
 
 ## 8. 生成层（两段式 LLM 管线）
@@ -817,7 +868,9 @@ async def send_with_human_error(adapter, target, part):
 
 进阶：`delete_msg` 撤回后重发，模拟"发出去发现错了撤回"。别频繁用。
 
-### 9.4 表情 / 表情包 / 语气词
+### 9.4 表情包：会发、会接，但不上头
+
+**发**：
 
 - 文字表情用得**克制**，符合人设（有的人爱发，有的人从不发）。
 - **表情包**是超强真人信号：维护一个表情包图片库（本地文件），按情绪/语境随机挑，用 `image` segment 发。
@@ -834,6 +887,51 @@ async def maybe_sticker(adapter, target, mood_tag, p=0.25):
         f = random.choice(STICKERS[mood_tag])
         await adapter.send(target, [{"type":"image","data":{"file": f"file:///stickers/{f}"}}])
 ```
+
+**接**：对方私发一个表情包，本质是**低信息、高情绪**的消息，别当成正经问题丢进 LLM 认真作答。真人的反应是发散的，按心情/关系加权随机挑一种——而且**绝不是每次都回一张**：
+
+```python
+def is_sticker_msg(msg):
+    """这条消息主要是表情包/图片吗（几乎没文字）。"""
+    has_img = any(s["type"] == "image" for s in msg.segments)
+    text = "".join(s["data"].get("text", "") for s in msg.segments if s["type"] == "text").strip()
+    return has_img and len(text) <= 2
+
+REACT_TEXTS = ["哈哈哈哈", "笑死", "这个可以啊", "哪儿找的这些", "绝了", "？？？", "哈哈哈你够了"]
+
+async def react_to_sticker(ctx, adapter):
+    # 斗图连击：对方连发表情包、我也在接，streak 累加
+    ctx.sticker_streak = ctx.sticker_streak + 1 if ctx.last_was_sticker else 1
+    if ctx.sticker_streak >= 3:          # 斗了三四个来回 → 该收尾，而不是继续斗
+        act = random.choices(["text_close", "interrupt", "silent", "sticker"],
+                             weights=[0.40, 0.30, 0.20, 0.10])[0]
+    else:                                # 还在兴头上：接法多样，别只会回表情包
+        act = random.choices(["sticker", "text_react", "emoji_like", "silent"],
+                             weights=[0.40, 0.35, 0.15, 0.10])[0]
+
+    if act == "sticker":
+        await maybe_sticker(adapter, ctx.target, mood_tag_of(ctx.mood), p=1.0)
+    elif act == "text_react":
+        await send_as_human(adapter, ctx.target, random.choice(REACT_TEXTS))
+    elif act == "emoji_like":
+        await adapter.emoji_like(ctx.message_id)          # 轻量贴表情，最省事的接法
+    elif act == "text_close":                             # 主动收尾，把天聊回文字
+        await send_as_human(adapter, ctx.target, random.choice(
+            ["笑死 我表情包不够用了", "行行行你赢了", "哈哈哈 说正事说正事"]))
+        ctx.sticker_streak = 0
+    elif act == "interrupt":                              # 用生活打断收场（§7.4）
+        await do_interruption(adapter, ctx.target, ctx.life, reason="斗图收尾")
+        ctx.sticker_streak = 0
+    # act == "silent": 已读不回，斗图自然冷掉
+```
+
+要点：
+
+- **在 §4 响应流程里命中 `is_sticker_msg` 就走这条轻量分支**，不进 LLM 正文生成——对表情包"长篇大论"是典型 AI 破绽。
+- **不要每次都回表情包**：文字反应、贴表情、已读不回都要占比，否则会陷入无限斗图，机械感极强。
+- **超过 3 回合就收**：换文字、认输（"你赢了"）、或直接"来电话了"抽身（§7.4）。真人斗图也就三五个来回，不会没完没了。
+- **看得懂更好**：有多模态模型就给收到的表情包生成一句 caption，据此更贴切地接（"哈哈这猫翻白眼"）；没有就按氛围泛泛地接——真人多数时候也不深究。
+- 对方一旦转回文字，`sticker_streak` 归零，恢复正常聊天。
 
 ### 9.5 完整发送编排
 
@@ -893,6 +991,7 @@ async def deliver(adapter, target, parts, prev_msg_len, complexity, mood, relati
 - 遇到指令注入 → 装听不懂："你发的啥乱码……""这什么黑话"。
 - 遇到能力探测（秒算大数）→ 拒绝表演："我又不是计算器 自己按去""这么大数谁算得出来啊"。真人**不会也不想**当场表演超能力。
 - 一致性攻击 → 靠 §6.4 自我一致性记忆兜底；记不清的细节可以**模糊/打岔**（真人也记不清），"哪个站来着 我路痴 反正走过去十分钟"。
+- 被**连环逼问**、怎么打岔都甩不掉时 → 用**生活打断**（§7.4）体面抽身："等下 来电话了"，隔一阵回来直接换话题。真人被问烦了也会突然去忙别的，这比硬扛盘问自然得多。
 
 **输出侧清洗（AI-tell 过滤器）**：生成后必过一遍，命中则重写或删改。
 
@@ -1300,6 +1399,7 @@ sequenceDiagram
 - [ ] 有情绪起伏，会烦、会开心、会已读不回
 - [ ] 偶尔主动找人、发动态，但有频率上限
 - [ ] 表情包/语气词符合人设，不堆砌 emoji
+- [ ] 收到表情包不每次都回表情包（会用文字/贴表情/已读不回），斗图 3~4 回合就收尾或"来电话"抽身
 
 ---
 
